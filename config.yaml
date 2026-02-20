@@ -1,0 +1,91 @@
+# JARVIS-M4 配置文件
+# 首次运行前请根据本机环境修改以下项
+
+# 使用哪个「大脑」：ollama（本地，延迟低、像真人对话）或 kimi（云端，中文好但受网速影响）
+# 使用 Kimi 时请设置环境变量 KIMI_API_KEY，不要写在此文件里
+llm:
+  backend: "ollama"  # 改为 ollama 用本地模型，响应更快；改回 kimi 则用云端
+
+# Ollama 服务地址（当 llm.backend 为 ollama 时使用）
+ollama:
+  base_url: "http://localhost:11434"
+  model: "qwen2.5:3b"  # 实测最快；本地还有 7b/4b/8b 可换
+  timeout_seconds: 60
+
+# Kimi（月之暗面）API（当 llm.backend 为 kimi 时使用）
+# API Key 请通过环境变量设置: export KIMI_API_KEY=sk-xxx
+kimi:
+  base_url: "https://api.moonshot.cn/v1"   # 国内用 cn，海外可用 https://api.moonshot.ai/v1
+  model: "moonshot-v1-8k"                   # 或 moonshot-v1-32k、kimi-k2 等，以平台文档为准
+  timeout_seconds: 60
+
+# 听觉 / 录音与 VAD（语音活动检测）：灵敏度接近 Mac mini 自带语音输入
+# 数值已调为更灵敏：较低 rms_threshold 可收录更轻的人声；较短 silence 结束更跟手
+ears:
+  timeout_seconds: 15.0       # 单次最长录音秒数（可说约 15 秒；想说更长可改为 20～30）
+  rms_threshold: 280         # 音量阈值，低于此更灵敏（原 500）；环境吵可调高到 350～450
+  silence_duration_ms: 550   # 持续静音多少毫秒后认为一句话结束（原 700）
+  speech_min_ms: 300         # 最短语音长度（毫秒），避免误触（原 400）
+
+# Faster-Whisper 语音识别
+# 模型会自动下载到缓存，或指定本地路径
+whisper:
+  model_size: "tiny"   # tiny | base | small；small 更准但更慢，tiny 实时性好
+  device: "cpu"       # Mac 上通常用 cpu；若用 MPS 需 faster-whisper 支持
+  compute_type: "int8" # int8 在 M4 上速度快、精度几乎不降
+  language: "zh"      # 中文为主可填 zh，多语言可留空自动检测
+  beam_size: 3        # 1 最快、5 更准；折中选 3 提升容错
+  initial_prompt: "贾维斯 龙虾 打开 关闭 音量 截屏 时间 锁屏 天气 备忘录 日历 音乐 Safari"  # 词汇提示，减少同音错字
+
+# TTS 语音合成
+tts:
+  engine: "edge-tts"  # 先只用 edge-tts，后续可接 cosyvoice
+  voice: "zh-CN-XiaoxiaoNeural"  # 中文女声，顺滑好听
+  cache_dir: ".tts_cache"        # 相同句子复用缓存，避免重复请求
+
+# 触发方式：wake_word 为 true 时用唤醒词，否则用 trigger（enter 或 key）
+trigger: "enter"
+
+# 唤醒词（可选；关闭则用上面 trigger，如按 Enter）
+wake_word:
+  enabled: false
+  model_path: ""
+  threshold: 0.30
+
+# 状态动画图标（运行时会写状态到此文件）
+icon_state_file: ".jarvis_state"
+
+# 系统提示词（注入 LLM，塑造贾维斯人设与能力说明）
+system_prompt_path: "prompts/system.txt"
+
+# exec_shell 白名单（安全）：仅允许以下前缀的命令执行；留空或 allow_all: true 则不做限制（不推荐）
+exec_shell:
+  allow_all: false
+  whitelist:
+    - "open -a "           # 打开应用（与 mac_open_app 互补）
+    - "open \""             # 打开 URL/文件
+    - "osascript "          # AppleScript（音量、锁屏等）
+    - "date "               # 查时间
+    - "pmset "              # 关屏等
+    - "uptime"              # 运行时间
+    - "df "                 # 磁盘
+
+# 对话记忆：每 N 轮生成一次摘要，压缩旧对话以保留上下文
+memory:
+  summary_every_rounds: 4   # 每 4 轮（4 次用户+4 次助手）做一次摘要
+  max_rounds_before_summary: 8  # 达到 8 条消息时，将最早 8 条摘要成一条
+
+# 日志（可选）：不配置则仅输出到控制台
+# log:
+#   level: "INFO"   # DEBUG / INFO / WARNING / ERROR
+#   file: "logs/jarvis.log"
+
+# OpenClaw 执行结果语音回传（可选）
+# 启用后，贾维斯会通过 Gateway 的 HTTP API 发送指令并等待执行结果，再用语音读给你听。
+# 需在 OpenClaw Gateway 配置中开启 responses 端点，并设置认证（见进阶说明）。
+openclaw:
+  use_http: true    # 已开启：贾维斯通过 HTTP 获取 OpenClaw 执行结果并语音播报
+  gateway_url: "http://127.0.0.1:18789"
+  # 认证：Gateway 为 password 时用环境变量 export OPENCLAW_GATEWAY_PASSWORD=你的密码（勿设 OPENCLAW_GATEWAY_TOKEN）
+  # 为 token 时用 export OPENCLAW_GATEWAY_TOKEN=你的密钥。建议勿在下方写明文。
+  timeout_seconds: 90

@@ -1,0 +1,31 @@
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 运行时/状态（main.py 写入，jarvis_icon.py 读取）
+.jarvis_state
+
+# TTS 缓存（可重新生成）
+.tts_cache/
+
+# 临时与日志
+tmp/
+*.log
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.so
+.eggs/
+*.egg-info/
+*.egg
+
+# 本地配置备份（若你有 config.local.yaml 等）
+# config.local.yaml
+
+# macOS
+.DS_Store

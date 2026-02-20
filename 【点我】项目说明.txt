@@ -1,0 +1,15 @@
+JARVIS-M4 项目文件都在这个文件夹里！
+
+如果 Cursor 左侧看不到任何文件，请按下面做：
+
+1. 菜单栏选：文件 → 打开文件夹…（或按 Cmd + O）
+2. 在弹窗里粘贴或选择这个路径：
+   /Users/qhdh/JARVIS-M4
+3. 点「打开」
+
+本文件夹应包含：
+- brain.py, ears.py, mouth.py, main.py（核心代码）
+- config.yaml, requirements.txt, run.sh
+- README.md, prompts/system.txt 等
+
+贾维斯已安装到「应用程序」（~/Applications/JARVIS.app）。添加到程序坞：打开「启动台」找到 JARVIS，拖到程序坞即可。

@@ -1,0 +1,23 @@
+[project]
+name = "jarvis-m4"
+version = "0.1.0"
+description = "本地语音助手核心骨架，面向 Mac Mini M4，支持 ASR / LLM / TTS 全链路"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp>=3.9.0",
+    "faster-whisper>=1.0.0",
+    "edge-tts>=6.1.0",
+    "langchain>=0.1.0",
+    "langchain-community>=0.0.20",
+    "PyAudio>=0.2.14",
+    "pygame>=2.5.0",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["*"]

@@ -1,0 +1,36 @@
+# JARVIS-M4 语音助手核心依赖
+# Python 3.11+，优先在 macOS (Apple Silicon M4) 上使用 Metal (MPS) 加速
+#
+# ---------- 可选依赖（按需安装）----------
+# 唤醒词（说出唤醒词即开始录音，不装则用「按 Enter」触发）:
+#   pip install openwakeword
+# 安装后首次需下载模型: python3 -c "import openwakeword; openwakeword.utils.download_models()"
+# 或使用项目脚本（绕过 SSL）: ./scripts/download_openwakeword_models.sh
+#
+# 本地推理 MPS 等（需自行编译）: llama-cpp-python
+# ---------- 以上为可选 -----------
+
+# LLM 通过 Ollama HTTP API 调用，用 aiohttp 做异步请求
+aiohttp>=3.9.0
+
+# 语音识别：Faster-Whisper，支持 MPS（Mac 上需配置 device/compute_type）
+faster-whisper>=1.0.0
+numpy>=1.24.0
+
+# 语音合成：Edge-TTS（在线、高质量）
+edge-tts>=6.1.0
+
+# 工具调用与编排：LangChain（用于 Function Calling 等）
+langchain>=0.1.0
+langchain-community>=0.0.20
+
+# 麦克风采集：PyAudio
+PyAudio>=0.2.14
+
+# 音频播放：pygame 的 mixer 用于播放 TTS 生成的音频
+pygame>=2.5.0
+
+# 配置文件解析
+PyYAML>=6.0
+
+# 可选依赖见文件顶部注释（openwakeword、llama-cpp-python 等）

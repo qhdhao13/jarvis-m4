@@ -1,0 +1,32 @@
+#!/bin/bash
+# 贾维斯 Mac 应用入口：优先使用 Homebrew 的 ARM64 Python，避免 Rosetta 下 tkinter 崩溃
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+PROJECT_ROOT="/Users/qhdh/JARVIS-M4"
+LOG_FILE="$PROJECT_ROOT/tmp/jarvis_run.log"
+mkdir -p "$(dirname "$LOG_FILE")"
+cd "$PROJECT_ROOT" || exit 0
+
+# 优先用项目内 venv（ARM64 + 已装依赖），否则用 Homebrew 的 python3
+if [ -x "$PROJECT_ROOT/.venv/bin/python3" ]; then
+  PYTHON="$PROJECT_ROOT/.venv/bin/python3"
+else
+  PYTHON=$(command -v python3 2>/dev/null)
+fi
+if [ -z "$PYTHON" ]; then
+  osascript -e 'display alert "贾维斯" message "未找到 python3，请确保已安装 Python。"'
+  exit 0
+fi
+
+# 后台运行主程序（输出写日志）
+"$PYTHON" main.py >> "$LOG_FILE" 2>&1 &
+MAIN_PID=$!
+sleep 1
+
+# 尝试显示图标窗口；若崩溃则只保留后台运行并弹窗提示
+export JARVIS_PROJECT_ROOT="$PROJECT_ROOT"
+if "$PYTHON" jarvis_icon.py 2>> "$LOG_FILE"; then
+  kill $MAIN_PID 2>/dev/null
+else
+  osascript -e 'display alert "贾维斯" message "贾维斯已在后台运行。在终端按 Enter 开始对话，或从程序坞再次点击贾维斯。\n（图标窗口在本环境下不可用，不影响使用）"'
+fi
+exit 0
