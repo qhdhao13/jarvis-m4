@@ -119,6 +119,7 @@ def record_until_silence(
     silence_duration_ms: float = VAD_SILENCE_MS,
     speech_min_ms: float = VAD_SPEECH_MIN_MS,
     rms_threshold: float = VAD_RMS_THRESHOLD,
+    input_device_index: int | None = None,
 ) -> bytes:
     """
     从默认麦克风录音，检测到人声后开始保留，持续静音一段时间后停止。
@@ -131,13 +132,16 @@ def record_until_silence(
     pa = pyaudio.PyAudio()
     stream = None
     try:
-        stream = pa.open(
+        open_kwargs = dict(
             format=FORMAT,
             channels=CHANNELS,
             rate=SAMPLE_RATE,
             input=True,
             frames_per_buffer=CHUNK,
         )
+        if input_device_index is not None:
+            open_kwargs["input_device_index"] = int(input_device_index)
+        stream = pa.open(**open_kwargs)
         frames = []
         in_speech = False
         speech_start_idx = -1

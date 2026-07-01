@@ -20,6 +20,8 @@ import brain
 import ears
 import jarvis_logging
 import mouth
+import owner_face
+import vision
 
 # 唤醒词：可选依赖 openwakeword，未安装时仍使用「按 Enter」触发
 try:
@@ -48,8 +50,18 @@ def load_config(config_path: str = "config.yaml") -> dict:
         return yaml.safe_load(f) or {}
 
 
+# 当前状态（内存 + 文件，供主人打招呼等后台任务读取）
+_current_state = STATE_IDLE
+
+
+def _read_current_state() -> str:
+    return _current_state
+
+
 def _write_icon_state(state: str, config: dict) -> None:
     """写入当前状态到文件，供状态动画图标脚本读取（IDLE/LISTENING/PROCESSING/SPEAKING）。"""
+    global _current_state
+    _current_state = state.strip()
     path = (config.get("icon_state_file") or "").strip()
     if not path:
         return
@@ -60,6 +72,27 @@ def _write_icon_state(state: str, config: dict) -> None:
         p.write_text(state.strip(), encoding="utf-8")
     except Exception:
         pass
+
+
+def _resolve_wake_model_path(wake_cfg: dict) -> str:
+    """解析唤醒词模型路径：优先 model_path，否则按 model_name 在 openwakeword 目录查找。"""
+    model_path = (wake_cfg.get("model_path") or "").strip()
+    if model_path and Path(model_path).exists():
+        return model_path
+    model_name = (wake_cfg.get("model_name") or "hey_jarvis_v0.1").strip()
+    if not model_name or not _OPENWAKEWORD_AVAILABLE:
+        return model_path
+    try:
+        import openwakeword as oww_pkg
+        models_dir = Path(oww_pkg.__file__).resolve().parent / "resources" / "models"
+        framework = wake_cfg.get("inference_framework") or ("onnx" if sys.platform == "darwin" else "tflite")
+        ext = ".onnx" if framework == "onnx" else ".tflite"
+        candidate = models_dir / f"{model_name}{ext}"
+        if candidate.exists():
+            return str(candidate)
+    except Exception:
+        pass
+    return model_path
 
 
 def _wake_word_loop_blocking(wake_cfg: dict):
@@ -73,28 +106,45 @@ def _wake_word_loop_blocking(wake_cfg: dict):
     FORMAT = pyaudio.paInt16
     CHANNELS = 1
     threshold = float(wake_cfg.get("threshold", 0.5))
-    model_path = (wake_cfg.get("model_path") or "").strip()
+    model_path = _resolve_wake_model_path(wake_cfg)
     # macOS 上通常用 onnx；未指定时根据系统选择
     inference_framework = wake_cfg.get("inference_framework") or ("onnx" if sys.platform == "darwin" else "tflite")
 
     pa = pyaudio.PyAudio()
     stream = None
+    input_device = wake_cfg.get("input_device_index")
+    if input_device is not None:
+        input_device = int(input_device)
+    debug_scores = bool(wake_cfg.get("debug_scores", False))
+    tick = 0
     try:
         if model_path and Path(model_path).exists():
             oww = WakeWordModel(wakeword_models=[model_path], inference_framework=inference_framework)
         else:
             oww = WakeWordModel(inference_framework=inference_framework)
-        stream = pa.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=CHUNK)
+        open_kwargs = dict(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=CHUNK)
+        if input_device is not None:
+            open_kwargs["input_device_index"] = input_device
+        stream = pa.open(**open_kwargs)
+        logger.info("[唤醒] 正在监听 Hey Jarvis…（阈值 %.2f）", threshold)
         while True:
             data = stream.read(CHUNK, exception_on_overflow=False)
             audio = np.frombuffer(data, dtype=np.int16)
             oww.predict(audio)
-            # 分数在 prediction_buffer 中：每个模型对应一个分数列表，取最新一项
+            tick += 1
+            best_name, best_score = "", 0.0
             for model_name, scores in (getattr(oww, "prediction_buffer", None) or {}).items():
-                if scores and len(scores) > 0 and float(scores[-1]) > threshold:
-                    return  # 检测到唤醒词，退出并释放麦克风
-    except Exception:
-        pass
+                if scores and len(scores) > 0:
+                    s = float(scores[-1])
+                    if s > best_score:
+                        best_score, best_name = s, model_name
+                    if s > threshold:
+                        logger.info("[唤醒] 检测到唤醒词: %s (%.3f)", model_name, s)
+                        return
+            if debug_scores and tick % 50 == 0:
+                logger.info("[唤醒] 当前分数 %s: %.4f（需 > %.2f）", best_name or "?", best_score, threshold)
+    except Exception as e:
+        logger.exception("[唤醒] 麦克风或模型异常: %s", e)
     finally:
         if stream:
             try:
@@ -108,7 +158,7 @@ def _wake_word_loop_blocking(wake_cfg: dict):
 def _try_create_wake_word_model(wake_cfg: dict) -> bool:
     """尝试创建唤醒词模型（用于启动时检测模型是否已下载）。成功返回 True。"""
     try:
-        model_path = (wake_cfg.get("model_path") or "").strip()
+        model_path = _resolve_wake_model_path(wake_cfg)
         inference_framework = wake_cfg.get("inference_framework") or ("onnx" if sys.platform == "darwin" else "tflite")
         if model_path and Path(model_path).exists():
             WakeWordModel(wakeword_models=[model_path], inference_framework=inference_framework)
@@ -150,14 +200,17 @@ def _wait_key_blocking():
 
 async def wait_for_trigger(config: dict):
     """
-    根据 config 的 trigger 选择触发方式：enter（按 Enter）、key（按任意键）。
-    从程序坞点开时没有终端，用「自动等几秒后开始听」代替按键，无需回车。
+    根据 config 的 trigger 选择触发方式：
+    - voice：持续监听，检测到开口即录（无需按键/唤醒词）
+    - enter / key：按键触发
+    从程序坞点开时没有终端，voice 模式直接听；其他模式等 2 秒后开始。
     """
-    # 无终端（如从程序坞启动）时不等回车，等 2 秒后直接开始听
+    trigger = (config.get("trigger") or "enter").strip().lower()
+    if trigger == "voice":
+        return
     if not sys.stdin.isatty():
         await asyncio.sleep(2)
         return
-    trigger = (config.get("trigger") or "enter").strip().lower()
     loop = asyncio.get_event_loop()
     if trigger == "key":
         await loop.run_in_executor(None, _wait_key_blocking)
@@ -165,7 +218,7 @@ async def wait_for_trigger(config: dict):
         await loop.run_in_executor(None, _wait_enter_blocking)
 
 
-async def run_once(config: dict, conversation_history: list) -> list:
+async def run_once(config: dict, conversation_history: list, vision_watcher: vision.VisionWatcher | None = None) -> list:
     """
     执行一轮：拾音 -> ASR -> LLM -> TTS -> 播放，并返回更新后的对话历史。
     LLM 根据 config 的 llm.backend 选择 Ollama 或 Kimi。
@@ -209,6 +262,7 @@ async def run_once(config: dict, conversation_history: list) -> list:
             silence_duration_ms=float(ears_cfg.get("silence_duration_ms", ears.VAD_SILENCE_MS)),
             speech_min_ms=float(ears_cfg.get("speech_min_ms", ears.VAD_SPEECH_MIN_MS)),
             rms_threshold=float(ears_cfg.get("rms_threshold", ears.VAD_RMS_THRESHOLD)),
+            input_device_index=ears_cfg.get("input_device_index"),
         )
     except Exception as e:
         logger.exception("录音失败: %s", e)
@@ -234,13 +288,27 @@ async def run_once(config: dict, conversation_history: list) -> list:
         return conversation_history
     logger.info("[用户] %s", user_text)
 
+    # 3.5) 视觉上下文：后台实时场景 + 用户明确问「看到什么」时即时再看一帧
+    vision_context = ""
+    if vision_watcher and vision_watcher.enabled:
+        if vision_watcher.inject_context:
+            vision_context = vision_watcher.get_context()
+        if vision_watcher.user_wants_vision(user_text):
+            fresh = await vision_watcher.analyze_now(user_text)
+            if fresh.strip():
+                vision_context = f"[摄像头即时画面]\n{fresh.strip()}"
+                logger.info("[视觉] 即时分析: %s", fresh[:80])
+
     # 4) LLM
     logger.info("[PROCESSING] 思考中...")
     if backend == "kimi":
+        kimi_prompt = system_prompt
+        if vision_context:
+            kimi_prompt = (system_prompt or "") + "\n\n" + vision_context
         reply = await brain.chat_simple_kimi(
             user_text,
             history=conversation_history,
-            system_prompt=system_prompt,
+            system_prompt=kimi_prompt,
             base_url=kimi_cfg.get("base_url", "https://api.moonshot.cn/v1"),
             model=kimi_cfg.get("model", "moonshot-v1-8k"),
             timeout=kimi_cfg.get("timeout_seconds", 60),
@@ -252,6 +320,7 @@ async def run_once(config: dict, conversation_history: list) -> list:
             system_prompt=system_prompt,
             base_url=ollama_cfg.get("base_url", "http://localhost:11434"),
             model=ollama_cfg.get("model", "qwen2.5:7b-instruct"),
+            vision_context=vision_context or None,
         )
     conversation_history.append({"role": "user", "content": user_text})
     conversation_history.append({"role": "assistant", "content": reply})
@@ -316,7 +385,9 @@ async def main():
             os.environ["OPENCLAW_GATEWAY_PASSWORD"] = str(openclaw_cfg["password"])
 
     wake_cfg = config.get("wake_word") or {}
-    use_wake_word = wake_cfg.get("enabled") and _OPENWAKEWORD_AVAILABLE
+    trigger = (config.get("trigger") or "enter").strip().lower()
+    use_voice_trigger = trigger == "voice"
+    use_wake_word = bool(wake_cfg.get("enabled")) and _OPENWAKEWORD_AVAILABLE and not use_voice_trigger
     wake_fallback_msg = False  # 是否已打印「改用按 Enter」类提示，避免重复
     # 若启用唤醒词，启动时检测模型是否存在（预训练模型需先下载）
     if use_wake_word:
@@ -328,11 +399,13 @@ async def main():
             logger.info("JARVIS-M4 已就绪。唤醒词模型未就绪，本次使用「按 Enter 后录音」。")
             logger.info("  首次使用唤醒词请先下载模型（需联网）: python3 -c \"import openwakeword; openwakeword.utils.download_models()\"")
     if use_wake_word:
-        logger.info("JARVIS-M4 已就绪。当前为「唤醒词」模式，说出唤醒词（如 Hey Jarvis）后开始录音。")
+        logger.info("JARVIS-M4 已就绪。当前为「唤醒词」模式，说出 **Hey Jarvis**（嘿·贾维斯）即可开始说话，无需按 Enter。")
     elif not wake_fallback_msg:
         if wake_cfg.get("enabled") and not _OPENWAKEWORD_AVAILABLE:
             logger.info("JARVIS-M4 已就绪。config 已启用唤醒词但未安装 openwakeword，使用按键触发。")
             logger.info("  安装唤醒词依赖: pip3 install openwakeword")
+        elif use_voice_trigger:
+            logger.info("JARVIS-M4 已就绪。持续监听模式：直接说话即可，无需按 Enter 或说 Hey Jarvis。")
         else:
             if not sys.stdin.isatty():
                 logger.info("JARVIS-M4 已就绪。当前为「程序坞」模式，约 2 秒后开始听，直接说话即可。")
@@ -345,21 +418,80 @@ async def main():
     conversation_history = []
     _write_icon_state(STATE_IDLE, config)
 
-    while True:
+    # 实时摄像头视觉（后台持续采集 + 周期性 minicpm-v 分析）
+    vision_cfg = config.get("vision") or {}
+    vision_watcher = vision.VisionWatcher(vision_cfg)
+    analyze_task = None
+    if vision_watcher.enabled:
+        if vision_watcher.start():
+            analyze_task = asyncio.create_task(vision_watcher.start_analyze_loop())
+            logger.info(
+                "实时视觉已开启：每 %.0f 秒更新画面，模型 %s",
+                vision_watcher.analyze_interval,
+                vision_watcher.model,
+            )
+        else:
+            logger.warning("实时视觉未能启动，请检查摄像头权限与 opencv 依赖。")
+
+    # 主人人脸识别 + 见面打招呼
+    owner_cfg = config.get("owner_greeting") or {}
+    owner_recognizer = owner_face.OwnerRecognizer(owner_cfg)
+    owner_greet_task = None
+    stop_greet = asyncio.Event()
+
+    async def _owner_speak_greeting(text: str) -> None:
+        tts_cfg = config.get("tts") or {}
+        _write_icon_state(STATE_SPEAKING, config)
         try:
-            if use_wake_word:
-                await wait_for_wake_word_async(config)
-                logger.info("[唤醒] 已检测到，请说话...")
-            else:
-                await wait_for_trigger(config)
-            conversation_history = await run_once(config, conversation_history)
-        except KeyboardInterrupt:
-            logger.info("再见。")
-            # 直接退出，避免等待 run_in_executor 里的线程（input/录音/播放）导致退出时报错
-            os._exit(0)
-        except Exception as e:
-            logger.exception("主循环异常: %s", e)
-            conversation_history = conversation_history  # 保持历史继续下一轮
+            await mouth.speak_sentence(
+                text,
+                voice=tts_cfg.get("voice", "zh-CN-XiaoxiaoNeural"),
+                cache_dir=tts_cfg.get("cache_dir", ".tts_cache"),
+            )
+        finally:
+            _write_icon_state(STATE_IDLE, config)
+
+    if owner_recognizer.enabled and vision_watcher.enabled:
+        if owner_recognizer.load():
+            owner_greet_task = asyncio.create_task(
+                owner_recognizer.greeting_loop(
+                    vision_watcher,
+                    _read_current_state,
+                    _owner_speak_greeting,
+                    stop_greet,
+                )
+            )
+    elif owner_recognizer.enabled:
+        logger.warning("[主人] 见面打招呼需同时开启 vision.enabled（摄像头）")
+
+    try:
+        while True:
+            try:
+                if use_wake_word:
+                    await wait_for_wake_word_async(config)
+                    logger.info("[唤醒] 已检测到，请说话...")
+                elif not use_voice_trigger:
+                    await wait_for_trigger(config)
+                else:
+                    _write_icon_state(STATE_IDLE, config)
+                    logger.info("[待机] 正在听…直接说话即可")
+                conversation_history = await run_once(config, conversation_history, vision_watcher)
+                if use_voice_trigger:
+                    # 避免把刚播完的 TTS 误当成用户说话
+                    await asyncio.sleep(0.8)
+            except KeyboardInterrupt:
+                logger.info("再见。")
+                os._exit(0)
+            except Exception as e:
+                logger.exception("主循环异常: %s", e)
+                conversation_history = conversation_history
+    finally:
+        stop_greet.set()
+        if owner_greet_task:
+            owner_greet_task.cancel()
+        if analyze_task:
+            analyze_task.cancel()
+        vision_watcher.stop()
 
 
 if __name__ == "__main__":

@@ -5,6 +5,14 @@
 set -e
 cd "$(dirname "$0")"
 
+# 加载本地 .env（KIMI_API_KEY 等，勿提交 Git）
+if [ -f .env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+fi
+
 # 确保使用虚拟环境：不存在则创建，然后统一用 .venv 里的 Python
 if [ ! -d ".venv" ]; then
   echo "正在创建虚拟环境 .venv ..."

@@ -4,12 +4,12 @@
 # 使用哪个「大脑」：ollama（本地，延迟低、像真人对话）或 kimi（云端，中文好但受网速影响）
 # 使用 Kimi 时请设置环境变量 KIMI_API_KEY，不要写在此文件里
 llm:
-  backend: "ollama"  # 改为 ollama 用本地模型，响应更快；改回 kimi 则用云端
+  backend: "kimi"  # kimi 云端语义理解更强；改 ollama 则用本地模型
 
 # Ollama 服务地址（当 llm.backend 为 ollama 时使用）
 ollama:
   base_url: "http://localhost:11434"
-  model: "qwen2.5:3b"  # 实测最快；本地还有 7b/4b/8b 可换
+  model: "qwen2.5:latest"  # 本机已安装；更快可 ollama pull qwen2.5:3b 后改回
   timeout_seconds: 60
 
 # Kimi（月之暗面）API（当 llm.backend 为 kimi 时使用）
@@ -43,14 +43,19 @@ tts:
   voice: "zh-CN-XiaoxiaoNeural"  # 中文女声，顺滑好听
   cache_dir: ".tts_cache"        # 相同句子复用缓存，避免重复请求
 
-# 触发方式：wake_word 为 true 时用唤醒词，否则用 trigger（enter 或 key）
-trigger: "enter"
+# 触发方式：voice=持续监听开口即说 | enter=按回车 | key=按任意键
+# 与 wake_word.enabled 二选一；voice 更适合中文直接说话
+trigger: "voice"
 
-# 唤醒词（可选；关闭则用上面 trigger，如按 Enter）
+# 语音唤醒（openWakeWord）：需说英文 Hey Jarvis；中文「贾维斯」无效
 wake_word:
   enabled: false
+  model_name: "hey_jarvis_v0.1"
   model_path: ""
-  threshold: 0.30
+  threshold: 0.25                 # 越低越灵敏；仍无反应请改用 trigger: voice
+  inference_framework: "onnx"
+  debug_scores: false             # 改为 true 可在日志里看唤醒分数
+  # input_device_index: 0         # 麦克风设备编号，不填则用系统默认
 
 # 状态动画图标（运行时会写状态到此文件）
 icon_state_file: ".jarvis_state"
@@ -89,3 +94,25 @@ openclaw:
   # 认证：Gateway 为 password 时用环境变量 export OPENCLAW_GATEWAY_PASSWORD=你的密码（勿设 OPENCLAW_GATEWAY_TOKEN）
   # 为 token 时用 export OPENCLAW_GATEWAY_TOKEN=你的密钥。建议勿在下方写明文。
   timeout_seconds: 90
+
+# 实时摄像头视觉（需本机 Ollama 已拉取视觉模型，如 ollama pull minicpm-v）
+# 后台持续采集画面，每 analyze_interval_seconds 用视觉模型更新场景描述，对话时自动注入
+vision:
+  enabled: true
+  device_index: 0              # 摄像头编号，外接摄像头多为 0 或 1
+  model: "minicpm-v:latest"  # Ollama 视觉模型
+  base_url: "http://localhost:11434"
+  analyze_interval_seconds: 3.0  # 每隔几秒刷新一次「当前看到什么」
+  capture_fps: 5               # 采集帧率（不必太高，省 CPU）
+  max_width: 640                 # 缩小后再送模型，更快
+  inject_context: true           # 每轮对话把最新画面描述注入 LLM
+
+# 主人见面打招呼：录入人脸后，摄像头认出主人即语音问候（全部本地）
+owner_greeting:
+  enabled: true
+  greeting: "你好主人，需要我做什么？"
+  cooldown_seconds: 300          # 同一次见面 5 分钟内不重复打招呼
+  check_interval_seconds: 2.0    # 每 2 秒检测一次画面
+  match_threshold: 0.36          # 人脸相似度阈值（越低越严格）
+  owner_dir: ".owner"            # 主人人脸数据目录
+  models_dir: "models/face"      # YuNet + SFace 模型目录

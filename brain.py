@@ -54,9 +54,56 @@ TOOL_DESCRIPTIONS = """
 
 
 async def get_weather(city: str) -> str:
-    """模拟天气查询（未接真实 API 时返回示例文案）。"""
-    # 可后续接 OpenWeather、和风等 API
-    return f"[天气] {city}：晴，15°C。（当前为模拟数据，可配置真实 API）"
+    """查询城市天气（wttr.in 免费接口，支持中文城市名如秦皇岛）。"""
+    city = (city or "").strip()
+    if not city:
+        return "请告诉我要查哪座城市。"
+    try:
+        from urllib.parse import quote
+
+        headers = {"User-Agent": "curl/7.64.1", "Accept-Language": "zh-CN,zh;q=0.9"}
+        q = quote(city)
+        async with aiohttp.ClientSession() as session:
+            # 优先 JSON 详情（wttr.in 返回 text/plain，需手动 json.loads）
+            url_j1 = f"https://wttr.in/{q}?format=j1&lang=zh"
+            async with session.get(url_j1, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status == 200:
+                    raw = await resp.text()
+                    data = json.loads(raw)
+                    cur = (data.get("current_condition") or [{}])[0]
+                    area = (data.get("nearest_area") or [{}])[0]
+                    name = city
+                    if area.get("areaName") and not any("\u4e00" <= c <= "\u9fff" for c in city):
+                        name = area["areaName"][0].get("value", city)
+                    temp = cur.get("temp_C", "?")
+                    feels = cur.get("FeelsLikeC", "")
+                    desc = ""
+                    if cur.get("lang_zh"):
+                        desc = cur["lang_zh"][0].get("value", "")
+                    elif cur.get("weatherDesc"):
+                        desc = cur["weatherDesc"][0].get("value", "")
+                    humid = cur.get("humidity", "")
+                    wind = cur.get("windspeedKmph", "")
+                    parts = [f"{name}现在{desc}，气温 {temp} 摄氏度"]
+                    if feels:
+                        parts.append(f"体感 {feels} 度")
+                    if humid:
+                        parts.append(f"湿度 {humid}%")
+                    if wind:
+                        parts.append(f"风速约 {wind} 公里每小时")
+                    return "，".join(parts) + "。"
+            # 回退：一行简讯
+            url3 = f"https://wttr.in/{q}?format=3&lang=zh"
+            async with session.get(url3, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status == 200:
+                    line = (await resp.text()).strip()
+                    if line:
+                        return line.replace(":", "，") + "。"
+        return f"{city}天气查询失败，请稍后再试。"
+    except asyncio.TimeoutError:
+        return f"{city}天气查询超时，请稍后再试。"
+    except Exception as e:
+        return f"{city}天气查询失败：{e}"
 
 
 # exec_shell 白名单：由 main 在加载 config 后调用 set_exec_shell_policy 注入
@@ -256,16 +303,61 @@ TOOLS = {
 
 
 def _parse_tool_call(text: str) -> dict | None:
-    """从模型输出中解析出一行 JSON 工具调用（若有）。"""
-    # 匹配 {...} 且包含 "tool" 键
-    for m in re.finditer(r"\{[^{}]*\"tool\"[^{}]*\}", text):
+    """从模型输出中解析 JSON 工具调用（支持嵌套 args、markdown 代码块）。"""
+    text = (text or "").strip()
+    if not text:
+        return None
+    # 去掉 markdown 代码块包裹
+    if "```" in text:
+        for block in re.findall(r"```(?:json)?\s*([\s\S]*?)```", text, flags=re.IGNORECASE):
+            text = block.strip()
+            break
+    candidates: list[str] = [text]
+    # 扫描所有平衡花括号的 JSON 片段（修复 nested args 导致旧正则匹配失败的问题）
+    i = 0
+    while i < len(text):
+        if text[i] != "{":
+            i += 1
+            continue
+        depth = 0
+        for j in range(i, len(text)):
+            if text[j] == "{":
+                depth += 1
+            elif text[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    candidates.append(text[i : j + 1])
+                    i = j + 1
+                    break
+        else:
+            break
+    for cand in candidates:
+        cand = cand.strip()
+        if not cand.startswith("{"):
+            continue
         try:
-            obj = json.loads(m.group())
+            obj = json.loads(cand)
             if isinstance(obj.get("tool"), str) and isinstance(obj.get("args"), dict):
                 return obj
         except json.JSONDecodeError:
             continue
     return None
+
+
+def _sanitize_speech_text(text: str) -> str:
+    """去掉不应朗读给用户的工具 JSON / 代码块，避免把命令当语音播放。"""
+    t = (text or "").strip()
+    if not t:
+        return t
+    if _parse_tool_call(t):
+        return ""
+    if t.startswith("{") and t.endswith("}"):
+        try:
+            json.loads(t)
+            return ""
+        except json.JSONDecodeError:
+            pass
+    return t
 
 
 async def _call_tool(tool_name: str, args: dict) -> str:
@@ -384,6 +476,14 @@ async def _one_round_kimi(
             return (choice.get("message") or {}).get("content") or ""
 
 
+def _append_vision_context(system: str, vision_context: str | None) -> str:
+    """将实时摄像头场景描述追加到系统提示词（若有）。"""
+    ctx = (vision_context or "").strip()
+    if not ctx:
+        return system
+    return system.strip() + "\n\n" + ctx
+
+
 async def chat(
     user_message: str,
     history: list[dict],
@@ -391,6 +491,7 @@ async def chat(
     base_url: str = OLLAMA_BASE,
     model: str = OLLAMA_MODEL,
     stream: bool = True,
+    vision_context: str | None = None,
 ):
     """
     与 Ollama 对话：先发一轮对话；若模型返回中包含工具调用则执行工具，
@@ -401,7 +502,7 @@ async def chat(
     """
     base_url = base_url.rstrip("/")
     system = system_prompt or _load_system_prompt(SYSTEM_PROMPT_PATH)
-    system = system.strip() + "\n\n" + TOOL_DESCRIPTIONS.strip()
+    system = _append_vision_context(system.strip() + "\n\n" + TOOL_DESCRIPTIONS.strip(), vision_context)
 
     messages = [{"role": "system", "content": system}]
     messages.extend(history)
@@ -452,13 +553,23 @@ async def chat_simple(
     system_prompt: str | None = None,
     base_url: str = OLLAMA_BASE,
     model: str = OLLAMA_MODEL,
+    vision_context: str | None = None,
 ) -> str:
     """非流式、一次性返回完整回复（Ollama 后端）。"""
     history = history or []
     full = []
-    async for chunk in chat(user_message, history, system_prompt=system_prompt, base_url=base_url, model=model, stream=False):
+    async for chunk in chat(
+        user_message,
+        history,
+        system_prompt=system_prompt,
+        base_url=base_url,
+        model=model,
+        stream=False,
+        vision_context=vision_context,
+    ):
         full.append(chunk)
-    return "".join(full)
+    result = "".join(full)
+    return _sanitize_speech_text(result) or result
 
 
 async def chat_simple_kimi(
@@ -494,4 +605,9 @@ async def chat_simple_kimi(
         messages.append({"role": "assistant", "content": assistant_message})
         messages.append({"role": "user", "content": follow_up})
         assistant_message = await _one_round_kimi(messages, key, base_url, model, timeout)
+    spoken = _sanitize_speech_text(assistant_message)
+    if spoken:
+        return spoken
+    if _parse_tool_call(assistant_message):
+        return "请求已收到，但生成语音回复时出错，请再说一次。"
     return assistant_message

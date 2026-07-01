@@ -33,4 +33,10 @@ pygame>=2.5.0
 # 配置文件解析
 PyYAML>=6.0
 
-# 可选依赖见文件顶部注释（openwakeword、llama-cpp-python 等）
+# 实时摄像头视觉（OpenCV 采集画面）
+opencv-python-headless>=4.8.0
+
+# 可选依赖见文件顶部注释（llama-cpp-python 等）
+
+# 语音唤醒：说出 Hey Jarvis 即开始录音（无需按 Enter）
+openwakeword>=0.6.0
